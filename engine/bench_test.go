@@ -900,3 +900,276 @@ func synthesizeLoad(numPods, numContainers, numSteps int) string {
 
 	return sb.String()
 }
+
+// BenchmarkRangeSelectorMemory benchmarks memory consumption for queries with
+// the same series cardinality but different range selector windows.
+// This helps understand how memory scales with the number of samples loaded.
+func BenchmarkRangeSelectorMemory(b *testing.B) {
+	// Create a 24-hour dataset with 30s intervals (2880 samples per series)
+	// numPods=1000, numContainers=3, numSteps=2880 (24h * 60min * 2 samples/min)
+	storage := setupStorage(b, 1000, 3, 2880)
+	defer storage.Close()
+
+	// Query at the end of the dataset to ensure all range selectors have data
+	queryTime := time.Unix(24*60*60, 0) // 24 hours
+
+	cases := []struct {
+		name         string
+		query        string
+		description  string
+		sampleWindow string
+	}{
+		// Rate function (counter)
+		{
+			name:         "rate_1m",
+			query:        `rate(http_requests_total[1m])`,
+			description:  "1 minute window (~2 samples per series)",
+			sampleWindow: "1m",
+		},
+		{
+			name:         "rate_1h",
+			query:        `rate(http_requests_total[1h])`,
+			description:  "1 hour window (~120 samples per series)",
+			sampleWindow: "1h",
+		},
+		{
+			name:         "rate_6h",
+			query:        `rate(http_requests_total[6h])`,
+			description:  "6 hour window (~720 samples per series)",
+			sampleWindow: "6h",
+		},
+		{
+			name:         "rate_24h",
+			query:        `rate(http_requests_total[24h])`,
+			description:  "24 hour window (~2880 samples per series)",
+			sampleWindow: "24h",
+		},
+		// Sum aggregation (gauge)
+		{
+			name:         "sum_over_time_1m",
+			query:        `sum_over_time(http_responses_total[1m])`,
+			description:  "sum_over_time 1m window",
+			sampleWindow: "1m",
+		},
+		{
+			name:         "sum_over_time_1h",
+			query:        `sum_over_time(http_responses_total[1h])`,
+			description:  "sum_over_time 1h window",
+			sampleWindow: "1h",
+		},
+		{
+			name:         "sum_over_time_6h",
+			query:        `sum_over_time(http_responses_total[6h])`,
+			description:  "sum_over_time 6h window",
+			sampleWindow: "6h",
+		},
+		{
+			name:         "sum_over_time_24h",
+			query:        `sum_over_time(http_responses_total[24h])`,
+			description:  "sum_over_time 24h window",
+			sampleWindow: "24h",
+		},
+		// Histogram quantile
+		{
+			name:         "histogram_quantile_1m",
+			query:        `histogram_quantile(0.95, rate(http_response_seconds_bucket[1m]))`,
+			description:  "Histogram quantile 1m window",
+			sampleWindow: "1m",
+		},
+		{
+			name:         "histogram_quantile_1h",
+			query:        `histogram_quantile(0.95, rate(http_response_seconds_bucket[1h]))`,
+			description:  "Histogram quantile 1h window",
+			sampleWindow: "1h",
+		},
+		{
+			name:         "histogram_quantile_6h",
+			query:        `histogram_quantile(0.95, rate(http_response_seconds_bucket[6h]))`,
+			description:  "Histogram quantile 6h window",
+			sampleWindow: "6h",
+		},
+		{
+			name:         "histogram_quantile_24h",
+			query:        `histogram_quantile(0.95, rate(http_response_seconds_bucket[24h]))`,
+			description:  "Histogram quantile 24h window",
+			sampleWindow: "24h",
+		},
+	}
+
+	opts := engine.Opts{
+		EngineOpts: promql.EngineOpts{
+			Logger:               nil,
+			Reg:                  nil,
+			MaxSamples:           50000000,
+			Timeout:              100 * time.Second,
+			EnableAtModifier:     true,
+			EnableNegativeOffset: true,
+		},
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			ng := engine.New(opts)
+
+			b.ResetTimer()
+			b.ReportAllocs()
+			for b.Loop() {
+				qry, err := ng.NewInstantQuery(context.Background(), storage, nil, tc.query, queryTime)
+				testutil.Ok(b, err)
+
+				res := qry.Exec(context.Background())
+				testutil.Ok(b, res.Err)
+			}
+		})
+	}
+}
+
+// BenchmarkCardinalityMemory benchmarks memory consumption for queries with
+// the same total number of samples but different series cardinality.
+// This helps understand how memory scales with cardinality vs sample count.
+func BenchmarkCardinalityMemory(b *testing.B) {
+	// Target: 120,000 total samples across all series (constant)
+	// Cardinality: 10, 100, 1000, 10000 series (each × 3 containers)
+	// We adjust the range selector window to keep total samples constant
+
+	cases := []struct {
+		name        string
+		numPods     int
+		numSteps    int
+		query       string
+		queryTime   time.Time
+		description string
+	}{
+		// Rate function tests
+		{
+			name:        "rate_cardinality_3_series",
+			numPods:     1,                                // 1 pod × 3 containers = 3 series
+			numSteps:    2880,                             // 24h of data at 30s intervals
+			query:       `rate(http_requests_total[20h])`, // ~2400 samples per series
+			queryTime:   time.Unix(24*60*60, 0),
+			description: "3 series × 2400 samples = 7,200 total samples",
+		},
+		{
+			name:        "rate_cardinality_30_series",
+			numPods:     10,                              // 10 pods × 3 containers = 30 series
+			numSteps:    2880,                            // 24h of data at 30s intervals
+			query:       `rate(http_requests_total[2h])`, // ~240 samples per series
+			queryTime:   time.Unix(24*60*60, 0),
+			description: "30 series × 240 samples = 7,200 total samples",
+		},
+		{
+			name:        "rate_cardinality_300_series",
+			numPods:     100,                              // 100 pods × 3 containers = 300 series
+			numSteps:    2880,                             // 24h of data at 30s intervals
+			query:       `rate(http_requests_total[12m])`, // ~24 samples per series
+			queryTime:   time.Unix(24*60*60, 0),
+			description: "300 series × 24 samples = 7,200 total samples",
+		},
+		{
+			name:        "rate_cardinality_3000_series",
+			numPods:     1000,                               // 1000 pods × 3 containers = 3,000 series
+			numSteps:    2880,                               // 24h of data at 30s intervals
+			query:       `rate(http_requests_total[1m12s])`, // ~2.4 samples per series
+			queryTime:   time.Unix(24*60*60, 0),
+			description: "3,000 series × 2.4 samples = 7,200 total samples",
+		},
+		// Sum over time tests (http_responses_total: numPods series)
+		{
+			name:        "sum_over_time_cardinality_1_series",
+			numPods:     1,                                          // 1 pod × 3 containers = 3 series
+			numSteps:    2880,                                       // 24h of data at 30s intervals
+			query:       `sum_over_time(http_responses_total[20h])`, // ~2400 samples per series
+			queryTime:   time.Unix(24*60*60, 0),
+			description: "3 series × 2400 samples = 7,200 total samples",
+		},
+		{
+			name:        "sum_over_time_cardinality_10_series",
+			numPods:     10,                                        // 10 pods × 3 containers = 30 series
+			numSteps:    2880,                                      // 24h of data at 30s intervals
+			query:       `sum_over_time(http_responses_total[2h])`, // ~240 samples per series
+			queryTime:   time.Unix(24*60*60, 0),
+			description: "30 series × 240 samples = 7,200 total samples",
+		},
+		{
+			name:        "sum_over_time_cardinality_100_series",
+			numPods:     100,                                        // 100 pods × 3 containers = 300 series
+			numSteps:    2880,                                       // 24h of data at 30s intervals
+			query:       `sum_over_time(http_responses_total[12m])`, // ~24 samples per series
+			queryTime:   time.Unix(24*60*60, 0),
+			description: "300 series × 24 samples = 7,200 total samples",
+		},
+		{
+			name:        "sum_over_time_cardinality_1000_series",
+			numPods:     1000,                                         // 1000 pods × 3 containers = 3000 series
+			numSteps:    2880,                                         // 24h of data at 30s intervals
+			query:       `sum_over_time(http_responses_total[1m12s])`, // ~2.4 samples per series
+			queryTime:   time.Unix(24*60*60, 0),
+			description: "3,000 series × 2.4 samples = 7,200 total samples",
+		},
+		// Histogram quantile tests (http_response_seconds_bucket: numPods × 11 buckets)
+		{
+			name:        "histogram_quantile_cardinality_11_series",
+			numPods:     1,                                                                   // 1 pod × 11 buckets = 11 series
+			numSteps:    2880,                                                                // 24h of data at 30s intervals
+			query:       `histogram_quantile(0.95, rate(http_response_seconds_bucket[11h]))`, // ~660 samples per series
+			queryTime:   time.Unix(24*60*60, 0),
+			description: "11 series × 660 samples = 7,260 total samples",
+		},
+		{
+			name:        "histogram_quantile_cardinality_110_series",
+			numPods:     10,                                                                   // 10 pods × 11 buckets = 110 series
+			numSteps:    2880,                                                                 // 24h of data at 30s intervals
+			query:       `histogram_quantile(0.95, rate(http_response_seconds_bucket[1h6m]))`, // ~66 samples per series
+			queryTime:   time.Unix(24*60*60, 0),
+			description: "110 series × 66 samples = 7,260 total samples",
+		},
+		{
+			name:        "histogram_quantile_cardinality_1100_series",
+			numPods:     100,                                                                   // 100 pods × 11 buckets = 1,100 series
+			numSteps:    2880,                                                                  // 24h of data at 30s intervals
+			query:       `histogram_quantile(0.95, rate(http_response_seconds_bucket[3m18s]))`, // ~6.6 samples per series
+			queryTime:   time.Unix(24*60*60, 0),
+			description: "1,100 series × 6.6 samples = 7,260 total samples",
+		},
+		{
+			name:        "histogram_quantile_cardinality_11000_series",
+			numPods:     1000,                                                                // 1000 pods × 11 buckets = 11,000 series
+			numSteps:    2880,                                                                // 24h of data at 30s intervals
+			query:       `histogram_quantile(0.95, rate(http_response_seconds_bucket[20s]))`, // ~0.66 samples per series
+			queryTime:   time.Unix(24*60*60, 0),
+			description: "11,000 series × 0.66 samples = 7,260 total samples",
+		},
+	}
+
+	opts := engine.Opts{
+		EngineOpts: promql.EngineOpts{
+			Logger:               nil,
+			Reg:                  nil,
+			MaxSamples:           50000000,
+			Timeout:              100 * time.Second,
+			EnableAtModifier:     true,
+			EnableNegativeOffset: true,
+		},
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			// Setup storage with specific cardinality
+			// numPods × 3 containers = total series count
+			storage := setupStorage(b, tc.numPods, 3, tc.numSteps)
+			defer storage.Close()
+
+			ng := engine.New(opts)
+
+			b.ResetTimer()
+			b.ReportAllocs()
+			for b.Loop() {
+				qry, err := ng.NewInstantQuery(context.Background(), storage, nil, tc.query, tc.queryTime)
+				testutil.Ok(b, err)
+
+				res := qry.Exec(context.Background())
+				testutil.Ok(b, res.Err)
+			}
+		})
+	}
+}
