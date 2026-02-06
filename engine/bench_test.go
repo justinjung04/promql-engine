@@ -901,129 +901,6 @@ func synthesizeLoad(numPods, numContainers, numSteps int) string {
 	return sb.String()
 }
 
-// BenchmarkRangeSelectorMemory benchmarks memory consumption for queries with
-// the same series cardinality but different range selector windows.
-// This helps understand how memory scales with the number of samples loaded.
-func BenchmarkRangeSelectorMemory(b *testing.B) {
-	// Create a 24-hour dataset with 30s intervals (2880 samples per series)
-	// numPods=1000, numContainers=3, numSteps=2880 (24h * 60min * 2 samples/min)
-	storage := setupStorage(b, 1000, 3, 2880)
-	defer storage.Close()
-
-	// Query at the end of the dataset to ensure all range selectors have data
-	queryTime := time.Unix(24*60*60, 0) // 24 hours
-
-	cases := []struct {
-		name         string
-		query        string
-		description  string
-		sampleWindow string
-	}{
-		// Rate function (counter)
-		{
-			name:         "rate_1m",
-			query:        `rate(http_requests_total[1m])`,
-			description:  "1 minute window (~2 samples per series)",
-			sampleWindow: "1m",
-		},
-		{
-			name:         "rate_1h",
-			query:        `rate(http_requests_total[1h])`,
-			description:  "1 hour window (~120 samples per series)",
-			sampleWindow: "1h",
-		},
-		{
-			name:         "rate_6h",
-			query:        `rate(http_requests_total[6h])`,
-			description:  "6 hour window (~720 samples per series)",
-			sampleWindow: "6h",
-		},
-		{
-			name:         "rate_24h",
-			query:        `rate(http_requests_total[24h])`,
-			description:  "24 hour window (~2880 samples per series)",
-			sampleWindow: "24h",
-		},
-		// Sum aggregation (gauge)
-		{
-			name:         "sum_over_time_1m",
-			query:        `sum_over_time(http_responses_total[1m])`,
-			description:  "sum_over_time 1m window",
-			sampleWindow: "1m",
-		},
-		{
-			name:         "sum_over_time_1h",
-			query:        `sum_over_time(http_responses_total[1h])`,
-			description:  "sum_over_time 1h window",
-			sampleWindow: "1h",
-		},
-		{
-			name:         "sum_over_time_6h",
-			query:        `sum_over_time(http_responses_total[6h])`,
-			description:  "sum_over_time 6h window",
-			sampleWindow: "6h",
-		},
-		{
-			name:         "sum_over_time_24h",
-			query:        `sum_over_time(http_responses_total[24h])`,
-			description:  "sum_over_time 24h window",
-			sampleWindow: "24h",
-		},
-		// Histogram quantile
-		{
-			name:         "histogram_quantile_1m",
-			query:        `histogram_quantile(0.95, rate(http_response_seconds_bucket[1m]))`,
-			description:  "Histogram quantile 1m window",
-			sampleWindow: "1m",
-		},
-		{
-			name:         "histogram_quantile_1h",
-			query:        `histogram_quantile(0.95, rate(http_response_seconds_bucket[1h]))`,
-			description:  "Histogram quantile 1h window",
-			sampleWindow: "1h",
-		},
-		{
-			name:         "histogram_quantile_6h",
-			query:        `histogram_quantile(0.95, rate(http_response_seconds_bucket[6h]))`,
-			description:  "Histogram quantile 6h window",
-			sampleWindow: "6h",
-		},
-		{
-			name:         "histogram_quantile_24h",
-			query:        `histogram_quantile(0.95, rate(http_response_seconds_bucket[24h]))`,
-			description:  "Histogram quantile 24h window",
-			sampleWindow: "24h",
-		},
-	}
-
-	opts := engine.Opts{
-		EngineOpts: promql.EngineOpts{
-			Logger:               nil,
-			Reg:                  nil,
-			MaxSamples:           50000000,
-			Timeout:              100 * time.Second,
-			EnableAtModifier:     true,
-			EnableNegativeOffset: true,
-		},
-	}
-
-	for _, tc := range cases {
-		b.Run(tc.name, func(b *testing.B) {
-			ng := engine.New(opts)
-
-			b.ResetTimer()
-			b.ReportAllocs()
-			for b.Loop() {
-				qry, err := ng.NewInstantQuery(context.Background(), storage, nil, tc.query, queryTime)
-				testutil.Ok(b, err)
-
-				res := qry.Exec(context.Background())
-				testutil.Ok(b, res.Err)
-			}
-		})
-	}
-}
-
 // BenchmarkCardinalityMemory benchmarks memory consumption for queries with
 // the same total number of samples but different series cardinality.
 // This helps understand how memory scales with cardinality vs sample count.
@@ -1075,7 +952,7 @@ func BenchmarkCardinalityMemory(b *testing.B) {
 		},
 		// Sum over time tests (http_responses_total: numPods series)
 		{
-			name:        "sum_over_time_cardinality_1_series",
+			name:        "sum_over_time_cardinality_3_series",
 			numPods:     1,                                          // 1 pod × 3 containers = 3 series
 			numSteps:    2880,                                       // 24h of data at 30s intervals
 			query:       `sum_over_time(http_responses_total[20h])`, // ~2400 samples per series
@@ -1083,7 +960,7 @@ func BenchmarkCardinalityMemory(b *testing.B) {
 			description: "3 series × 2400 samples = 7,200 total samples",
 		},
 		{
-			name:        "sum_over_time_cardinality_10_series",
+			name:        "sum_over_time_cardinality_30_series",
 			numPods:     10,                                        // 10 pods × 3 containers = 30 series
 			numSteps:    2880,                                      // 24h of data at 30s intervals
 			query:       `sum_over_time(http_responses_total[2h])`, // ~240 samples per series
@@ -1091,7 +968,7 @@ func BenchmarkCardinalityMemory(b *testing.B) {
 			description: "30 series × 240 samples = 7,200 total samples",
 		},
 		{
-			name:        "sum_over_time_cardinality_100_series",
+			name:        "sum_over_time_cardinality_300_series",
 			numPods:     100,                                        // 100 pods × 3 containers = 300 series
 			numSteps:    2880,                                       // 24h of data at 30s intervals
 			query:       `sum_over_time(http_responses_total[12m])`, // ~24 samples per series
@@ -1099,7 +976,7 @@ func BenchmarkCardinalityMemory(b *testing.B) {
 			description: "300 series × 24 samples = 7,200 total samples",
 		},
 		{
-			name:        "sum_over_time_cardinality_1000_series",
+			name:        "sum_over_time_cardinality_3000_series",
 			numPods:     1000,                                         // 1000 pods × 3 containers = 3000 series
 			numSteps:    2880,                                         // 24h of data at 30s intervals
 			query:       `sum_over_time(http_responses_total[1m12s])`, // ~2.4 samples per series
@@ -1165,6 +1042,447 @@ func BenchmarkCardinalityMemory(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				qry, err := ng.NewInstantQuery(context.Background(), storage, nil, tc.query, tc.queryTime)
+				testutil.Ok(b, err)
+
+				res := qry.Exec(context.Background())
+				testutil.Ok(b, res.Err)
+			}
+		})
+	}
+}
+
+// BenchmarkSamplesScannedMemory measures how memory consumption scales with the amount
+// of raw data scanned from storage (the range selector window size). Tests three query
+// types (rate, sum_over_time, histogram_quantile) with varying time windows (1m to 24h)
+// to understand the relationship between samples scanned and memory usage.
+func BenchmarkSamplesScannedMemory(b *testing.B) {
+	// Setup: 24-hour dataset with 30s intervals
+	// - 1000 pods × 3 containers = 3,000 series (http_requests_total)
+	// - 1000 pods × 11 buckets = 11,000 series (http_response_seconds_bucket)
+	// - 2,880 samples per series (24h * 60min * 2 samples/min)
+	storage := setupStorage(b, 1000, 3, 2880)
+	defer storage.Close()
+
+	// Query at end of dataset to have full 24h of data available
+	queryTime := time.Unix(24*60*60, 0)
+
+	cases := []struct {
+		name             string
+		query            string
+		description      string
+		samplesScanned   int
+		samplesProcessed int
+		outputSamples    int
+	}{
+		{
+			name:             "subquery_1m_window",
+			query:            `rate(http_requests_total[1m:1m])`,
+			description:      "Subquery with 1m window, scans 1m of data, processes 1 sample per series",
+			samplesScanned:   2,
+			samplesProcessed: 1,
+			outputSamples:    1,
+		},
+		{
+			name:             "subquery_1h_window",
+			query:            `rate(http_requests_total[1h:1h])`,
+			description:      "Subquery with 1h window, scans 1h of data, processes 1 sample per series",
+			samplesScanned:   120,
+			samplesProcessed: 1,
+			outputSamples:    1,
+		},
+		{
+			name:             "subquery_6h_window",
+			query:            `rate(http_requests_total[6h:6h])`,
+			description:      "Subquery with 6h window, scans 6h of data, processes 1 sample per series",
+			samplesScanned:   720,
+			samplesProcessed: 1,
+			outputSamples:    1,
+		},
+		{
+			name:             "subquery_24h_window",
+			query:            `rate(http_requests_total[24h:24h])`,
+			description:      "Subquery with 24h window, scans 24h of data, processes 1 sample per series",
+			samplesScanned:   2880,
+			samplesProcessed: 1,
+			outputSamples:    1,
+		},
+		{
+			name:             "sum_over_time_1m_window",
+			query:            `sum_over_time(http_requests_total[1m])`,
+			description:      "sum_over_time with 1m window, scans 1m of data",
+			samplesScanned:   2,
+			samplesProcessed: 2,
+			outputSamples:    1,
+		},
+		{
+			name:             "sum_over_time_1h_window",
+			query:            `sum_over_time(http_requests_total[1h])`,
+			description:      "sum_over_time with 1h window, scans 1h of data",
+			samplesScanned:   120,
+			samplesProcessed: 120,
+			outputSamples:    1,
+		},
+		{
+			name:             "sum_over_time_6h_window",
+			query:            `sum_over_time(http_requests_total[6h])`,
+			description:      "sum_over_time with 6h window, scans 6h of data",
+			samplesScanned:   720,
+			samplesProcessed: 720,
+			outputSamples:    1,
+		},
+		{
+			name:             "sum_over_time_24h_window",
+			query:            `sum_over_time(http_requests_total[24h])`,
+			description:      "sum_over_time with 24h window, scans 24h of data",
+			samplesScanned:   2880,
+			samplesProcessed: 2880,
+			outputSamples:    1,
+		},
+		{
+			name:             "histogram_quantile_1m_window",
+			query:            `histogram_quantile(0.5, rate(http_response_seconds_bucket[1m]))`,
+			description:      "histogram_quantile with 1m window, scans 1m of data",
+			samplesScanned:   2,
+			samplesProcessed: 1,
+			outputSamples:    1,
+		},
+		{
+			name:             "histogram_quantile_1h_window",
+			query:            `histogram_quantile(0.5, rate(http_response_seconds_bucket[1h]))`,
+			description:      "histogram_quantile with 1h window, scans 1h of data",
+			samplesScanned:   120,
+			samplesProcessed: 1,
+			outputSamples:    1,
+		},
+		{
+			name:             "histogram_quantile_6h_window",
+			query:            `histogram_quantile(0.5, rate(http_response_seconds_bucket[6h]))`,
+			description:      "histogram_quantile with 6h window, scans 6h of data",
+			samplesScanned:   720,
+			samplesProcessed: 1,
+			outputSamples:    1,
+		},
+		{
+			name:             "histogram_quantile_24h_window",
+			query:            `histogram_quantile(0.5, rate(http_response_seconds_bucket[24h]))`,
+			description:      "histogram_quantile with 24h window, scans 24h of data",
+			samplesScanned:   2880,
+			samplesProcessed: 1,
+			outputSamples:    1,
+		},
+	}
+
+	opts := engine.Opts{
+		EngineOpts: promql.EngineOpts{
+			Logger:               nil,
+			Reg:                  nil,
+			MaxSamples:           50000000,
+			Timeout:              100 * time.Second,
+			EnableAtModifier:     true,
+			EnableNegativeOffset: true,
+		},
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			ng := engine.New(opts)
+
+			b.ResetTimer()
+			b.ReportAllocs()
+			for b.Loop() {
+				qry, err := ng.NewInstantQuery(context.Background(), storage, nil, tc.query, queryTime)
+				testutil.Ok(b, err)
+
+				res := qry.Exec(context.Background())
+				testutil.Ok(b, res.Err)
+			}
+		})
+	}
+}
+
+// BenchmarkSamplesProcessedMemory validates whether "samples processed" impacts memory
+// when samples scanned are held constant. Uses subquery resolution parameter to vary
+// the number of evaluations while keeping the time window constant.
+func BenchmarkSamplesProcessedMemory(b *testing.B) {
+	// Create a 24-hour dataset with 30s intervals (2880 samples per series)
+	// numPods=1000, numContainers=3, numSteps=2880 (24h * 60min * 2 samples/min)
+	storage := setupStorage(b, 1000, 3, 2880)
+	defer storage.Close()
+
+	// Query at the end of the dataset
+	queryTime := time.Unix(24*60*60, 0)
+
+	cases := []struct {
+		name           string
+		query          string
+		description    string
+		samplesScanned int
+		evaluations    int
+		samplesPerEval int
+		totalProcessed int64
+		outputSamples  int
+	}{
+		{
+			name:           "subquery_24h_resolution_24h",
+			query:          `rate(http_requests_total[24h:24h])`,
+			description:    "24h window, evaluate once (at 24h), minimal processing",
+			samplesScanned: 2880,
+			evaluations:    1,
+			samplesPerEval: 2880,
+			totalProcessed: 2880,
+			outputSamples:  1,
+		},
+		{
+			name:           "subquery_24h_resolution_1h",
+			query:          `rate(http_requests_total[24h:1h])`,
+			description:    "24h window, evaluate every 1h (24 times), moderate processing",
+			samplesScanned: 2880,
+			evaluations:    24,
+			samplesPerEval: 2880,
+			totalProcessed: 2880 * 24, // 69,120
+			outputSamples:  24,
+		},
+		{
+			name:           "subquery_24h_resolution_15m",
+			query:          `rate(http_requests_total[24h:15m])`,
+			description:    "24h window, evaluate every 15m (96 times), high processing",
+			samplesScanned: 2880,
+			evaluations:    96,
+			samplesPerEval: 2880,
+			totalProcessed: 2880 * 96, // 276,480
+			outputSamples:  96,
+		},
+		{
+			name:           "subquery_24h_resolution_1m",
+			query:          `rate(http_requests_total[24h:1m])`,
+			description:    "24h window, evaluate every 1m (1440 times), massive processing",
+			samplesScanned: 2880,
+			evaluations:    1440,
+			samplesPerEval: 2880,
+			totalProcessed: 2880 * 1440, // 4,147,200
+			outputSamples:  1440,
+		},
+		{
+			name:           "histogram_quantile_24h_resolution_24h",
+			query:          `histogram_quantile(0.5, rate(http_response_seconds_bucket[24h:24h]))`,
+			description:    "histogram_quantile 24h window, evaluate once (at 24h), minimal processing",
+			samplesScanned: 2880,
+			evaluations:    1,
+			samplesPerEval: 2880,
+			totalProcessed: 2880,
+			outputSamples:  1,
+		},
+		{
+			name:           "histogram_quantile_24h_resolution_1h",
+			query:          `histogram_quantile(0.5, rate(http_response_seconds_bucket[24h:1h]))`,
+			description:    "histogram_quantile 24h window, evaluate every 1h (24 times), moderate processing",
+			samplesScanned: 2880,
+			evaluations:    24,
+			samplesPerEval: 2880,
+			totalProcessed: 2880 * 24, // 69,120
+			outputSamples:  24,
+		},
+		{
+			name:           "histogram_quantile_24h_resolution_15m",
+			query:          `histogram_quantile(0.5, rate(http_response_seconds_bucket[24h:15m]))`,
+			description:    "histogram_quantile 24h window, evaluate every 15m (96 times), high processing",
+			samplesScanned: 2880,
+			evaluations:    96,
+			samplesPerEval: 2880,
+			totalProcessed: 2880 * 96, // 276,480
+			outputSamples:  96,
+		},
+		{
+			name:           "histogram_quantile_24h_resolution_1m",
+			query:          `histogram_quantile(0.5, rate(http_response_seconds_bucket[24h:1m]))`,
+			description:    "histogram_quantile 24h window, evaluate every 1m (1440 times), massive processing",
+			samplesScanned: 2880,
+			evaluations:    1440,
+			samplesPerEval: 2880,
+			totalProcessed: 2880 * 1440, // 4,147,200
+			outputSamples:  1440,
+		},
+	}
+
+	opts := engine.Opts{
+		EngineOpts: promql.EngineOpts{
+			Logger:               nil,
+			Reg:                  nil,
+			MaxSamples:           50000000,
+			Timeout:              100 * time.Second,
+			EnableAtModifier:     true,
+			EnableNegativeOffset: true,
+		},
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			ng := engine.New(opts)
+
+			b.ResetTimer()
+			b.ReportAllocs()
+			for b.Loop() {
+				qry, err := ng.NewInstantQuery(context.Background(), storage, nil, tc.query, queryTime)
+				testutil.Ok(b, err)
+
+				res := qry.Exec(context.Background())
+				testutil.Ok(b, res.Err)
+			}
+		})
+	}
+}
+
+// BenchmarkSamplesProcessedOverlap validates whether overlapping windows in range queries
+// have similar memory impact as subqueries with multiple evaluations.
+// Compares with BenchmarkSamplesProcessedMemory to see if overlap behaves similarly.
+func BenchmarkSamplesProcessedOverlapMemory(b *testing.B) {
+	// Create a 24-hour dataset with 30s intervals (2880 samples per series)
+	// numPods=1000, numContainers=3, numSteps=2880 (24h * 60min * 2 samples/min)
+	storage := setupStorage(b, 1000, 3, 2880)
+	defer storage.Close()
+
+	// All queries: same number of evaluations (23), varying samples per evaluation
+	cases := []struct {
+		name           string
+		query          string
+		start          time.Time
+		end            time.Time
+		step           time.Duration
+		description    string
+		samplesScanned int
+		evaluations    int
+		samplesPerEval int
+		totalProcessed int64
+	}{
+		{
+			name:           "range_24h_window_1h_step_1h",
+			query:          `rate(http_requests_total[1h])`,
+			start:          time.Unix(0, 0),
+			end:            time.Unix(24*60*60, 0),
+			step:           1 * time.Hour,
+			description:    "24h range, 1h window, 1h step (24 evaluations, minimal processing)",
+			samplesScanned: 2880 + 120, // 24h + 1h lookback
+			evaluations:    24,
+			samplesPerEval: 120,
+			totalProcessed: 120 * 24, // 2,880
+		},
+		{
+			name:           "range_12h_window_12h_step_30m",
+			query:          `rate(http_requests_total[12h])`,
+			start:          time.Unix(12*60*60, 0), // 12h
+			end:            time.Unix(24*60*60, 0), // 24h
+			step:           30 * time.Minute,
+			description:    "12h range, 12h window, 30m step (24 evaluations, high processing)",
+			samplesScanned: 2880, // 24h (12h + 12h lookback)
+			evaluations:    24,
+			samplesPerEval: 1440,
+			totalProcessed: 1440 * 24, // 34,560
+		},
+		{
+			name:           "range_1h_window_24h_step_2m30s",
+			query:          `rate(http_requests_total[24h])`,
+			start:          time.Unix(23*60*60, 0), // 23h
+			end:            time.Unix(24*60*60, 0), // 24h
+			step:           150 * time.Second,      // 2m30s
+			description:    "1h range, 24h window, 2m30s step (24 evaluations, massive processing)",
+			samplesScanned: 2880, // 24h (1h + 24h lookback, but capped at dataset)
+			evaluations:    24,
+			samplesPerEval: 2880,
+			totalProcessed: 2880 * 24, // 69,120
+		},
+		{
+			name:           "sum_over_time_24h_window_1h_step",
+			query:          `sum_over_time(http_requests_total[1h])`,
+			start:          time.Unix(0, 0),
+			end:            time.Unix(24*60*60, 0),
+			step:           1 * time.Hour,
+			description:    "sum_over_time 24h range, 1h window, 1h step (24 evaluations)",
+			samplesScanned: 2880 + 120, // 24h + 1h lookback
+			evaluations:    24,
+			samplesPerEval: 120,
+			totalProcessed: 120 * 24, // 2,880
+		},
+		{
+			name:           "sum_over_time_12h_window_30m_step",
+			query:          `sum_over_time(http_requests_total[12h])`,
+			start:          time.Unix(12*60*60, 0), // 12h
+			end:            time.Unix(24*60*60, 0), // 24h
+			step:           30 * time.Minute,
+			description:    "sum_over_time 12h range, 12h window, 30m step (24 evaluations)",
+			samplesScanned: 2880, // 24h (12h + 12h lookback)
+			evaluations:    24,
+			samplesPerEval: 1440,
+			totalProcessed: 1440 * 24, // 34,560
+		},
+		{
+			name:           "sum_over_time_24h_window_2m30s_step",
+			query:          `sum_over_time(http_requests_total[24h])`,
+			start:          time.Unix(23*60*60, 0), // 23h
+			end:            time.Unix(24*60*60, 0), // 24h
+			step:           150 * time.Second,      // 2m30s
+			description:    "sum_over_time 1h range, 24h window, 2m30s step (24 evaluations)",
+			samplesScanned: 2880, // 24h (1h + 24h lookback, but capped at dataset)
+			evaluations:    24,
+			samplesPerEval: 2880,
+			totalProcessed: 2880 * 24, // 69,120
+		},
+		{
+			name:           "histogram_quantile_1h_window_1h_step",
+			query:          `histogram_quantile(0.5, rate(http_response_seconds_bucket[1h]))`,
+			start:          time.Unix(0, 0),
+			end:            time.Unix(24*60*60, 0),
+			step:           1 * time.Hour,
+			description:    "histogram_quantile 24h range, 1h window, 1h step (24 evaluations)",
+			samplesScanned: 2880 + 120, // 24h + 1h lookback
+			evaluations:    24,
+			samplesPerEval: 120,
+			totalProcessed: 120 * 24, // 2,880
+		},
+		{
+			name:           "histogram_quantile_12h_window_30m_step",
+			query:          `histogram_quantile(0.5, rate(http_response_seconds_bucket[12h]))`,
+			start:          time.Unix(12*60*60, 0), // 12h
+			end:            time.Unix(24*60*60, 0), // 24h
+			step:           30 * time.Minute,
+			description:    "histogram_quantile 12h range, 12h window, 30m step (24 evaluations)",
+			samplesScanned: 2880, // 24h (12h + 12h lookback)
+			evaluations:    24,
+			samplesPerEval: 1440,
+			totalProcessed: 1440 * 24, // 34,560
+		},
+		{
+			name:           "histogram_quantile_24h_window_2m30s_step",
+			query:          `histogram_quantile(0.5, rate(http_response_seconds_bucket[24h]))`,
+			start:          time.Unix(23*60*60, 0), // 23h
+			end:            time.Unix(24*60*60, 0), // 24h
+			step:           150 * time.Second,      // 2m30s
+			description:    "histogram_quantile 1h range, 24h window, 2m30s step (24 evaluations)",
+			samplesScanned: 2880, // 24h (1h + 24h lookback, but capped at dataset)
+			evaluations:    24,
+			samplesPerEval: 2880,
+			totalProcessed: 2880 * 24, // 69,120
+		},
+	}
+
+	opts := engine.Opts{
+		EngineOpts: promql.EngineOpts{
+			Logger:               nil,
+			Reg:                  nil,
+			MaxSamples:           50000000,
+			Timeout:              100 * time.Second,
+			EnableAtModifier:     true,
+			EnableNegativeOffset: true,
+		},
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			ng := engine.New(opts)
+
+			b.ResetTimer()
+			b.ReportAllocs()
+			for b.Loop() {
+				qry, err := ng.NewRangeQuery(context.Background(), storage, nil, tc.query, tc.start, tc.end, tc.step)
 				testutil.Ok(b, err)
 
 				res := qry.Exec(context.Background())
